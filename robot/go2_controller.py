@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from interfaces.robot_interface import RobotInterface
+
 try:
     from unitree_sdk2py.go2.sport.sport_client import SportClient
 except ModuleNotFoundError as exc:
@@ -17,7 +19,7 @@ class Go2ControllerConfig:
     max_wz: float = 1.0
 
 
-class Go2Controller:
+class Go2Controller(RobotInterface):
     """Thin wrapper around Unitree SportClient."""
 
     def __init__(self, config: Go2ControllerConfig | None = None) -> None:
@@ -50,10 +52,13 @@ class Go2Controller:
         self.ensure_connected()
         self.client.StandDown()
 
-    def stop(self) -> None:
-        self.move(MotionCommand())
+    def walk(self, vx: float, vy: float, yaw: float) -> None:
+        self.move(MotionCommand(vx=vx, vy=vy, wz=yaw))
 
     def move(self, cmd: MotionCommand) -> None:
         self.ensure_connected()
         safe = clamp_velocity(cmd, max_v=self.config.max_v, max_wz=self.config.max_wz)
         self.client.Move(safe.vx, safe.vy, safe.wz)
+
+
+Go2Robot = Go2Controller

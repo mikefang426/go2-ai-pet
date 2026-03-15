@@ -1,7 +1,10 @@
-from robot.go2_controller import Go2Controller
-from robot.movement import MotionCommand
+import os
+
+from interfaces.robot_interface import RobotInterface
 
 
 class Patrol:
-    def run(self, controller: Go2Controller) -> None:
-        controller.move(MotionCommand(vx=0.15, vy=0.0, wz=0.2))
+    def run(self, controller: RobotInterface) -> None:
+        vx = float(os.getenv("PATROL_VX", "0.22"))
+        yaw = float(os.getenv("PATROL_YAW", "0.32"))
+        controller.walk(vx, 0.0, yaw)

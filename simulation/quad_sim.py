@@ -2,6 +2,7 @@ import os
 import time
 import math
 import sys
+import json
 
 try:
     import pybullet as p
@@ -35,6 +36,25 @@ def env_flag(name, default=False):
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+def env_sign(name, default=1.0):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return -1.0 if value < 0.0 else 1.0
+
+def env_float(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 def connect_bullet(prefer_gui=True):
     # On some macOS drivers, forcing --opengl2 can segfault in native code.
@@ -133,10 +153,10 @@ def main():
     env_name = os.getenv("QUAD_SIM_ENV", "empty_room").strip().lower() or "empty_room"
     stairs_mode = env_name == "stairs" or env_flag("QUAD_SIM_STAIRS_MODE", False)
     debug_controls = env_flag("QUAD_SIM_DEBUG", False)
-    # The default Laikago asset's visual "nose" points opposite the joint-space
-    # forward direction used by the stock model. In flat scenes, interpret W/S
-    # in the robot body frame and flip that body-forward axis once here.
-    flat_body_forward_sign = -1.0
+    # Keyboard controls should match the robot's visible heading. Allow an env
+    # override because different quadruped assets may disagree about which body
+    # axis is visually "forward".
+    flat_body_forward_sign = env_sign("QUAD_SIM_FORWARD_SIGN", 1.0)
 
     # Visual settings (GUI only)
     if mode == p.GUI:
@@ -166,6 +186,7 @@ def main():
 
     leg_joints = {}
     stand_targets_by_id = {}
+    sit_targets_by_id = {}
     stand_joint_ids = []
     gait_phase = 0.0
     joint_name_by_id = {}
@@ -231,6 +252,25 @@ def main():
             targets[lower_id] = clamp_joint(joint_name_by_id[lower_id], lower)
         return targets
 
+    def build_sit_targets():
+        # A compact seated pose for simple text-command demos.
+        targets = dict(stand_targets_by_id)
+        for leg in ("FR", "FL", "RR", "RL"):
+            joints = leg_joints.get(leg, {})
+            if not all(k in joints for k in ("hip", "upper", "lower")):
+                continue
+            side = -1.0 if leg in ("FR", "RR") else 1.0
+            hip_id = joints["hip"]
+            upper_id = joints["upper"]
+            lower_id = joints["lower"]
+            hip = side * 0.08
+            upper = 1.05
+            lower = -2.10
+            targets[hip_id] = clamp_joint(joint_name_by_id[hip_id], hip)
+            targets[upper_id] = clamp_joint(joint_name_by_id[upper_id], upper)
+            targets[lower_id] = clamp_joint(joint_name_by_id[lower_id], lower)
+        return targets
+
     def apply_joint_targets(robot_id, target_by_id):
         if not target_by_id:
             return
@@ -251,6 +291,9 @@ def main():
     def hold_stand_pose(robot_id):
         apply_joint_targets(robot_id, stand_targets_by_id)
 
+    def hold_sit_pose(robot_id):
+        apply_joint_targets(robot_id, sit_targets_by_id)
+
     def body_exists(body_id):
         if not isinstance(body_id, int) or body_id < 0:
             return False
@@ -263,13 +306,14 @@ def main():
         return False
 
     def reload_world():
-        nonlocal leg_joints, stand_targets_by_id, stand_joint_ids, gait_phase, joint_name_by_id
+        nonlocal leg_joints, stand_targets_by_id, sit_targets_by_id, stand_joint_ids, gait_phase, joint_name_by_id
         try:
             p.setTimeStep(dt)
             new_plane, new_robot = load_world()
             apply_dynamics(new_plane, new_robot)
             leg_joints, stand_targets_by_id, joint_name_by_id = configure_joint_layout(new_robot)
             stand_targets_by_id = build_stand_targets()
+            sit_targets_by_id = build_sit_targets()
             stand_joint_ids = list(stand_targets_by_id.keys())
             gait_phase = 0.0
             hold_stand_pose(new_robot)
@@ -300,12 +344,30 @@ def main():
     vx = vy = wz = 0.0
     target_vx = target_vy = target_wz = 0.0
 
-    max_v = 0.20
-    max_wz = 0.8
-    gain = 0.12  # smoothing
+    max_v = env_float("QUAD_SIM_MAX_V", 0.30)
+    max_wz = env_float("QUAD_SIM_MAX_WZ", 0.8)
+    manual_gain = env_float("QUAD_SIM_MANUAL_GAIN", 0.12)
+    external_lin_gain = env_float("QUAD_SIM_EXTERNAL_LIN_GAIN", 0.045)
+    external_wz_gain = env_float("QUAD_SIM_EXTERNAL_WZ_GAIN", 0.040)
+    manual_lin_accel = env_float("QUAD_SIM_MANUAL_LIN_ACCEL", 2.60)
+    manual_wz_accel = env_float("QUAD_SIM_MANUAL_WZ_ACCEL", 6.50)
+    external_lin_accel = env_float("QUAD_SIM_EXTERNAL_LIN_ACCEL", 0.85)
+    external_wz_accel = env_float("QUAD_SIM_EXTERNAL_WZ_ACCEL", 1.80)
+    sit_speed_threshold = env_float("QUAD_SIM_SIT_SPEED_THRESHOLD", 0.05)
+    sit_turn_threshold = env_float("QUAD_SIM_SIT_TURN_THRESHOLD", 0.16)
+    posture_blend_rate = env_float("QUAD_SIM_POSTURE_BLEND_RATE", 2.80)
+    posture_blend = 1.0  # 1.0=stand, 0.0=sit
     if stairs_mode:
         max_v = 0.28
-        gain = 0.045
+        manual_gain = 0.045
+        external_lin_gain = min(external_lin_gain, 0.040)
+        external_wz_gain = min(external_wz_gain, 0.035)
+        external_lin_accel = min(external_lin_accel, 0.70)
+        external_wz_accel = min(external_wz_accel, 1.40)
+    external_cmd_file = os.getenv("QUAD_SIM_CMD_FILE", "").strip()
+    external_posture = "stand"
+    if external_cmd_file:
+        print(f"[quad_sim] external command mode enabled: {external_cmd_file}")
 
     def key_is_down(keys, ch):
         lo = ord(ch.lower())
@@ -316,6 +378,55 @@ def main():
         lo = ord(ch.lower())
         hi = ord(ch.upper())
         return ((lo in keys) and (keys[lo] & p.KEY_WAS_TRIGGERED)) or ((hi in keys) and (keys[hi] & p.KEY_WAS_TRIGGERED))
+
+    def read_external_command():
+        if not external_cmd_file:
+            return None
+        try:
+            with open(external_cmd_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+
+        try:
+            vx_cmd = float(payload.get("vx", 0.0))
+            vy_cmd = float(payload.get("vy", 0.0))
+            wz_cmd = float(payload.get("wz", 0.0))
+        except (TypeError, ValueError):
+            return None
+
+        posture = str(payload.get("posture", "stand")).strip().lower()
+        if posture not in {"stand", "sit"}:
+            posture = "stand"
+
+        return {
+            "vx": clamp(vx_cmd, -max_v, max_v),
+            "vy": clamp(vy_cmd, -max_v, max_v),
+            "wz": clamp(wz_cmd, -max_wz, max_wz),
+            "posture": posture,
+        }
+
+    def smooth_axis(current, target, gain, accel_limit):
+        gain = clamp(gain, 0.0, 1.0)
+        blended = current + (target - current) * gain
+        if accel_limit <= 0.0:
+            return blended
+        max_delta = accel_limit * dt
+        delta = blended - current
+        if abs(delta) > max_delta:
+            delta = math.copysign(max_delta, delta)
+        return current + delta
+
+    def blend_static_pose(alpha):
+        alpha = clamp(alpha, 0.0, 1.0)
+        # Linear blend between sit (0.0) and stand (1.0) for gentler posture transitions.
+        targets = {}
+        for joint_id, stand_val in stand_targets_by_id.items():
+            sit_val = sit_targets_by_id.get(joint_id, stand_val)
+            targets[joint_id] = sit_val + (stand_val - sit_val) * alpha
+        return targets
 
     def reset_robot():
         nonlocal vx, vy, wz, target_vx, target_vy, target_wz, plane, robot
@@ -340,13 +451,37 @@ def main():
     reset_robot()
 
     def apply_base_cmd(vx_cmd, vy_cmd, wz_cmd):
-        nonlocal gait_phase
+        nonlocal gait_phase, external_posture, posture_blend
         if not body_exists(robot):
             return False
         try:
             pos, orn = p.getBasePositionAndOrientation(robot)
             roll, pitch, yaw = p.getEulerFromQuaternion(orn)
             lin_vel, ang_vel = p.getBaseVelocity(robot)
+
+            desired_posture_blend = 0.0 if (external_cmd_file and external_posture == "sit") else 1.0
+            blend_step = max(0.0, posture_blend_rate) * dt
+            if posture_blend < desired_posture_blend:
+                posture_blend = min(desired_posture_blend, posture_blend + blend_step)
+            elif posture_blend > desired_posture_blend:
+                posture_blend = max(desired_posture_blend, posture_blend - blend_step)
+
+            if external_cmd_file and external_posture == "sit":
+                # Let robot decelerate first, then settle into sit smoothly.
+                planar_speed = math.hypot(lin_vel[0], lin_vel[1])
+                yaw_rate = abs(ang_vel[2])
+                cmd_level_for_sit = max(abs(vx_cmd), abs(vy_cmd), abs(wz_cmd))
+                if (
+                    planar_speed < sit_speed_threshold
+                    and yaw_rate < sit_turn_threshold
+                    and cmd_level_for_sit < 0.03
+                ):
+                    gait_phase = 0.0
+                    if posture_blend <= 0.02:
+                        hold_sit_pose(robot)
+                    else:
+                        apply_joint_targets(robot, blend_static_pose(posture_blend))
+                    return True
 
             # Only recover if it fully tips; do not overwrite pose every frame.
             if abs(roll) > 0.8 or abs(pitch) > 0.8 or pos[2] < 0.18:
@@ -405,7 +540,10 @@ def main():
 
             if cmd_level < 0.02:
                 gait_phase = 0.0
-                hold_stand_pose(robot)
+                if external_cmd_file and posture_blend < 0.995:
+                    apply_joint_targets(robot, blend_static_pose(posture_blend))
+                else:
+                    hold_stand_pose(robot)
                 return True
 
             if climbing_active:
@@ -434,13 +572,21 @@ def main():
                 # and stabilizing torques, but avoid hard base-velocity resets.
                 body_fwd = flat_body_forward_sign * vx_eff
                 body_lat = vy_eff
+                strafe_bias = clamp(abs(body_lat) - 0.35 * abs(body_fwd) - 0.25 * abs(wz_eff), 0.0, 1.0)
                 cos_yaw = math.cos(yaw)
                 sin_yaw = math.sin(yaw)
                 target_lin_x = (body_fwd * cos_yaw - body_lat * sin_yaw) * max_v
                 target_lin_y = (body_fwd * sin_yaw + body_lat * cos_yaw) * max_v
                 target_yaw_rate = wz_eff * max_wz
-                force_x = clamp(140.0 * (target_lin_x - lin_vel[0]), -42.0, 42.0)
-                force_y = clamp(110.0 * (target_lin_y - lin_vel[1]), -28.0, 28.0)
+                if strafe_bias > 0.05 and abs(wz_eff) < 0.10:
+                    yaw_err = math.atan2(math.sin(-yaw), math.cos(-yaw))
+                    target_yaw_rate += strafe_bias * clamp(2.2 * yaw_err - 0.8 * ang_vel[2], -0.55, 0.55)
+                force_x = clamp(
+                    185.0 * (target_lin_x - lin_vel[0]) + 18.0 * body_fwd - 115.0 * strafe_bias * lin_vel[0],
+                    -62.0,
+                    62.0,
+                )
+                force_y = clamp(175.0 * (target_lin_y - lin_vel[1]) + 16.0 * body_lat, -52.0, 52.0)
                 p.applyExternalForce(
                     robot,
                     -1,
@@ -450,7 +596,7 @@ def main():
                 )
                 roll_torque = clamp(-90.0 * roll - 16.0 * ang_vel[0], -24.0, 24.0)
                 pitch_torque = clamp(-105.0 * pitch - 18.0 * ang_vel[1], -28.0, 28.0)
-                yaw_torque = clamp(24.0 * (target_yaw_rate - ang_vel[2]), -10.0, 10.0)
+                yaw_torque = clamp(42.0 * (target_yaw_rate - ang_vel[2]) + 8.0 * wz_eff, -24.0, 24.0)
                 p.applyExternalTorque(
                     robot,
                     -1,
@@ -490,9 +636,10 @@ def main():
                 else:
                     phase_offset = 0.0 if leg in ("FR", "RL") else math.pi
                 phi = gait_phase + phase_offset
-                phase01 = (phi / (2.0 * math.pi)) % 1.0
-                swing = math.sin(phi)                   # fore/aft phase
-                lift = max(0.0, math.sin(phi))          # swing-leg lift [0..1] in forward half-cycle
+                walk_phi = phi
+                phase01 = (walk_phi / (2.0 * math.pi)) % 1.0
+                swing = math.sin(walk_phi)              # fore/aft phase
+                lift = max(0.0, math.sin(walk_phi))     # swing-leg lift [0..1]
                 if climbing_active:
                     # Lengthen swing phase to reduce toe strikes at step edges.
                     lift = lift ** 0.62
@@ -513,14 +660,17 @@ def main():
                 # Left turn (wz>0): right legs move forward, left legs backward.
                 yaw_leg = -side
                 if flat_mode:
-                    sweep = 0.12 * (flat_body_forward_sign * vx_eff) + 0.045 * wz_eff * yaw_leg
+                    # Keep the flat-ground fore/aft step mild so the external
+                    # translation controller sets direction instead of the legs
+                    # fighting positive vx on every other half-cycle.
+                    sweep = -0.05 * (flat_body_forward_sign * vx_eff) + 0.12 * wz_eff * yaw_leg
                 else:
                     sweep = 0.22 * vx_eff + 0.16 * wz_eff * yaw_leg
                 if climbing_active:
                     sweep *= 1.55
 
                 if flat_mode:
-                    hip = stand_targets_by_id[hip_id] + side * (0.025 * vy_eff) + side * (0.006 * swing)
+                    hip = stand_targets_by_id[hip_id] + side * (0.075 * vy_eff + 0.035 * wz_eff + 0.010 * vy_eff * swing) + side * (0.006 * swing)
                     upper = stand_targets_by_id[upper_id] + sweep * swing - 0.03 * lift
                     lower = stand_targets_by_id[lower_id] - 0.07 * lift - 0.10 * sweep * swing
                     front_leg = leg in ("FR", "FL")
@@ -553,7 +703,10 @@ def main():
         except p.error:
             return False
 
-    print("Controls: W/S forward/back, Q/E strafe, A/D rotate, Space stop, R reset, Esc quit")
+    if external_cmd_file:
+        print("[quad_sim] commands come from main.py (follow/patrol/sit/stand/stop)")
+    else:
+        print("Controls: W/S forward/back, Q/E strafe, A/D rotate, Space stop, R reset, Esc quit")
     if stairs_mode:
         print("[quad_sim] stairs_mode enabled (higher traction, higher foot lift, climb assist)")
     if debug_controls:
@@ -621,13 +774,35 @@ def main():
             else:
                 target_wz = max_wz if a_down else -max_wz
 
+            external_cmd = read_external_command()
+            if external_cmd is not None:
+                target_vx = external_cmd["vx"]
+                target_vy = external_cmd["vy"]
+                target_wz = external_cmd["wz"]
+                external_posture = external_cmd["posture"]
+                if external_posture == "sit":
+                    target_vx = target_vy = target_wz = 0.0
+                w_down = s_down = q_down = e_down = a_down = d_down = False
+
             target_vx = clamp(target_vx, -max_v, max_v)
             target_vy = clamp(target_vy, -max_v, max_v)
             target_wz = clamp(target_wz, -max_wz, max_wz)
 
-            vx += (target_vx - vx) * gain
-            vy += (target_vy - vy) * gain
-            wz += (target_wz - wz) * gain
+            using_external = external_cmd is not None
+            if using_external:
+                lin_gain = external_lin_gain
+                wz_gain = external_wz_gain
+                lin_accel = external_lin_accel
+                wz_accel = external_wz_accel
+            else:
+                lin_gain = manual_gain
+                wz_gain = manual_gain
+                lin_accel = manual_lin_accel
+                wz_accel = manual_wz_accel
+
+            vx = smooth_axis(vx, target_vx, lin_gain, lin_accel)
+            vy = smooth_axis(vy, target_vy, lin_gain, lin_accel)
+            wz = smooth_axis(wz, target_wz, wz_gain, wz_accel)
 
             if not apply_base_cmd(vx, vy, wz):
                 new_plane, new_robot = reload_world()

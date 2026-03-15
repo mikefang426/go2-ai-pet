@@ -1,12 +1,27 @@
+import argparse
+
 from ai.llm_agent import LLMAgent
 from behavior.follow_user import FollowUser
 from behavior.greet_person import GreetPerson
 from behavior.patrol import Patrol
-from robot.go2_controller import Go2Controller
+from interfaces.robot_interface import RobotInterface
+
+
+def build_robot(mode: str) -> RobotInterface:
+    if mode == "sim":
+        from simulation.sim_controller import SimRobot as Robot
+    else:
+        from robot.go2_controller import Go2Robot as Robot
+
+    return Robot()
 
 
 def main() -> None:
-    controller = Go2Controller()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["sim", "real"], default="sim")
+    args = parser.parse_args()
+
+    controller = build_robot(args.mode)
     agent = LLMAgent()
 
     behaviors = {
@@ -15,10 +30,13 @@ def main() -> None:
         "patrol": Patrol(),
     }
 
-    print("GO2 AI Pet started. 输入指令，例如: 跟随 / 巡逻 / 打招呼 / 停止")
+    print(
+        f"GO2 AI Pet started in {args.mode} mode. "
+        "Enter a command, e.g.: follow / patrol / greet / sit / stand / stop"
+    )
     while True:
         user_text = input("> ").strip()
-        if user_text in {"exit", "quit", "退出"}:
+        if user_text in {"exit", "quit"}:
             controller.stop()
             break
 

@@ -14,7 +14,7 @@ class IntentParser:
             return Intent("follow_user")
         if any(k in t for k in ["巡逻", "patrol"]):
             return Intent("patrol")
-        if any(k in t for k in ["打招呼", "hello", "hi"]):
+        if any(k in t for k in ["打招呼", "greet", "greeting", "hello", "hi"]):
             return Intent("greet_person")
         if any(k in t for k in ["坐下", "sit"]):
             return Intent("sit")

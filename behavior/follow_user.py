@@ -1,7 +1,9 @@
-from robot.go2_controller import Go2Controller
-from robot.movement import MotionCommand
+import os
+
+from interfaces.robot_interface import RobotInterface
 
 
 class FollowUser:
-    def run(self, controller: Go2Controller) -> None:
-        controller.move(MotionCommand(vx=0.2, vy=0.0, wz=0.0))
+    def run(self, controller: RobotInterface) -> None:
+        vx = float(os.getenv("FOLLOW_VX", "0.26"))
+        controller.walk(vx, 0.0, 0.0)
