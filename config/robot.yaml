@@ -1,0 +1,4 @@
+robot:
+  network_interface: null
+  max_v: 0.5
+  max_wz: 1.0

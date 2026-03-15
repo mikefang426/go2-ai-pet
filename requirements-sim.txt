@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Simulation dependency (PyBullet currently does not provide cp313 wheels)
+pybullet>=3.2.7

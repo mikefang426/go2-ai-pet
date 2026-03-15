@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Real robot control dependency (Python 3.11/3.12 + CycloneDDS toolchain)
+-e ../unitree_sdk2_python

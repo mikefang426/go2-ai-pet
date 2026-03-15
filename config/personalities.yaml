@@ -1,0 +1,7 @@
+personalities:
+  default:
+    tone: friendly
+    greeting: "你好，我是 GO2 AI 宠物"
+  guard:
+    tone: serious
+    greeting: "巡逻模式已启动"
