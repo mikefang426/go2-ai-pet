@@ -1,5 +1,21 @@
-venv/
-.venv*/
+# Python
 __pycache__/
 *.pyc
+
+# Virtual environments
+venv/
+.venv/
+.venv*/
+env/
+
+# macOS
 .DS_Store
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Temp
+*.tmp
