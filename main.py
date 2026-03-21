@@ -4,6 +4,8 @@ from ai.llm_agent import LLMAgent
 from behavior.follow_user import FollowUser
 from behavior.greet_person import GreetPerson
 from behavior.patrol import Patrol
+from behavior.sit import Sit
+from behavior.stand import Stand
 from interfaces.robot_interface import RobotInterface
 
 
@@ -28,6 +30,8 @@ def main() -> None:
         "greet_person": GreetPerson(),
         "follow_user": FollowUser(),
         "patrol": Patrol(),
+        "sit": Sit(),
+        "stand": Stand(),
     }
 
     print(
@@ -43,12 +47,6 @@ def main() -> None:
         intent = agent.infer_intent(user_text)
         if intent.name == "stop":
             controller.stop()
-            continue
-        if intent.name == "sit":
-            controller.sit()
-            continue
-        if intent.name == "stand":
-            controller.stand()
             continue
 
         behavior = behaviors.get(intent.name)
