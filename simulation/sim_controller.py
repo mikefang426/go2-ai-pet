@@ -72,6 +72,7 @@ class SimulationController(RobotInterface):
     is_standing: bool = True
     latest_command: MotionCommand = field(default_factory=MotionCommand)
     command_file: Path = field(init=False)
+    _action_seq: int = field(default=0, init=False)
     _sim_process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -102,9 +103,18 @@ class SimulationController(RobotInterface):
         )
         print(f"[sim_controller] launched simulator with command file: {self.command_file}")
 
-    def _write_command(self, cmd: MotionCommand, posture: str | None = None) -> None:
+    def _write_command(
+        self,
+        cmd: MotionCommand,
+        posture: str | None = None,
+        action: str | None = None,
+        action_id: int | None = None,
+    ) -> None:
         pose = posture if posture is not None else ("stand" if self.is_standing else "sit")
         payload = {"vx": cmd.vx, "vy": cmd.vy, "wz": cmd.wz, "posture": pose}
+        if action is not None:
+            payload["action"] = action
+            payload["action_id"] = int(action_id) if action_id is not None else 0
         tmp_path = self.command_file.with_suffix(".tmp")
         self.command_file.parent.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("w", encoding="utf-8") as fh:
@@ -145,6 +155,14 @@ class SimulationController(RobotInterface):
 
     def move(self, cmd: MotionCommand) -> None:
         self.walk(cmd.vx, cmd.vy, cmd.wz)
+
+    def flip(self) -> None:
+        if self.config.launch_simulator:
+            self._ensure_simulator_running()
+        self.is_standing = True
+        self.latest_command = MotionCommand()
+        self._action_seq += 1
+        self._write_command(self.latest_command, posture="stand", action="flip", action_id=self._action_seq)
 
 
 SimRobot = SimulationController

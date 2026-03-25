@@ -16,6 +16,8 @@ class IntentParser:
             return Intent("patrol")
         if any(k in t for k in ["打招呼", "greet", "greeting", "hello", "hi"]):
             return Intent("greet_person")
+        if any(k in t for k in ["翻跟头", "后空翻", "flip", "backflip"]):
+            return Intent("flip")
         if any(k in t for k in ["坐下", "sit"]):
             return Intent("sit")
         if any(k in t for k in ["站起", "stand"]):

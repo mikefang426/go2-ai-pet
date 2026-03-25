@@ -2,6 +2,7 @@ import argparse
 
 from ai.llm_agent import LLMAgent
 from behavior.follow_user import FollowUser
+from behavior.flip import Flip
 from behavior.greet_person import GreetPerson
 from behavior.patrol import Patrol
 from behavior.sit import Sit
@@ -27,6 +28,7 @@ def main() -> None:
     agent = LLMAgent()
 
     behaviors = {
+        "flip": Flip(),
         "greet_person": GreetPerson(),
         "follow_user": FollowUser(),
         "patrol": Patrol(),
@@ -36,7 +38,7 @@ def main() -> None:
 
     print(
         f"GO2 AI Pet started in {args.mode} mode. "
-        "Enter a command, e.g.: follow / patrol / greet / sit / stand / stop"
+        "Enter a command, e.g.: follow / patrol / greet / flip / sit / stand / stop"
     )
     while True:
         user_text = input("> ").strip()
