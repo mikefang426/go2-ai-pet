@@ -1,6 +1,7 @@
 import os
 import time
 
+from interfaces.behavior import BehaviorContext
 from interfaces.robot_interface import RobotInterface
 
 
@@ -13,12 +14,16 @@ class GreetPerson:
         yaw: float,
         duration: float,
         step: float,
+        context: BehaviorContext | None = None,
     ) -> None:
         step = max(0.02, step)
         t = 0.0
-        while t < max(0.0, duration):
+        while t < max(0.0, duration) and not (context and context.interrupted):
             controller.walk(vx, vy, yaw)
-            time.sleep(step)
+            if context and context.wait(step):
+                break
+            if context is None:
+                time.sleep(step)
             t += step
 
     @staticmethod
@@ -29,16 +34,29 @@ class GreetPerson:
         step: float,
         max_v: float,
         max_wz: float,
+        context: BehaviorContext | None = None,
     ) -> None:
         for vx, vy, yaw, duration in steps:
+            if context and context.interrupted:
+                break
             svx = max(-max_v, min(max_v, vx * style))
             svy = max(-max_v, min(max_v, vy * style))
             syaw = max(-max_wz, min(max_wz, yaw * style))
-            GreetPerson._hold_motion(controller, svx, svy, syaw, duration, step)
+            GreetPerson._hold_motion(controller, svx, svy, syaw, duration, step, context)
 
-    def run(self, controller: RobotInterface) -> None:
+    def run(self, controller: RobotInterface, context: BehaviorContext | None = None) -> None:
+        greet_fn = getattr(controller, "greet", None)
+        if callable(greet_fn):
+            greet_fn()
+            return
+
         controller.stand()
-        time.sleep(float(os.getenv("GREET_STABILIZE_SEC", "0.18")))
+        stabilize_sec = float(os.getenv("GREET_STABILIZE_SEC", "0.18"))
+        if context and context.wait(stabilize_sec):
+            controller.stop()
+            return
+        if context is None:
+            time.sleep(stabilize_sec)
         preset = os.getenv("GREET_PRESET", "super").strip().lower()
         if preset in {"super", "max", "intense"}:
             style_default = "2.15"
@@ -109,18 +127,18 @@ class GreetPerson:
         sway_cycles = int(os.getenv("GREET_SWAY_CYCLES", sway_cycles_default))
         wag_cycles = int(os.getenv("GREET_WAG_CYCLES", wag_cycles_default))
 
-        self._play_steps(controller, look_steps, style, dt, max_v, max_wz)
-        self._play_steps(controller, nod_steps, style, dt, max_v, max_wz)
+        self._play_steps(controller, look_steps, style, dt, max_v, max_wz, context)
+        self._play_steps(controller, nod_steps, style, dt, max_v, max_wz, context)
 
         sway_steps = []
         for _ in range(max(1, sway_cycles)):
             sway_steps.extend(sway_pair)
-        self._play_steps(controller, sway_steps, style, dt, max_v, max_wz)
+        self._play_steps(controller, sway_steps, style, dt, max_v, max_wz, context)
 
         wag_steps = []
         for _ in range(max(1, wag_cycles)):
             wag_steps.extend(wag_pair)
         wag_steps.append((0.00, 0.00, 0.00, 0.44))
-        self._play_steps(controller, wag_steps, style, dt, max_v, max_wz)
+        self._play_steps(controller, wag_steps, style, dt, max_v, max_wz, context)
 
         controller.stop()

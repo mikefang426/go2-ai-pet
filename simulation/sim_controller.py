@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
@@ -73,6 +74,7 @@ class SimulationController(RobotInterface):
     latest_command: MotionCommand = field(default_factory=MotionCommand)
     command_file: Path = field(init=False)
     _action_seq: int = field(default=0, init=False)
+    _command_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _sim_process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -110,16 +112,17 @@ class SimulationController(RobotInterface):
         action: str | None = None,
         action_id: int | None = None,
     ) -> None:
-        pose = posture if posture is not None else ("stand" if self.is_standing else "sit")
-        payload = {"vx": cmd.vx, "vy": cmd.vy, "wz": cmd.wz, "posture": pose}
-        if action is not None:
-            payload["action"] = action
-            payload["action_id"] = int(action_id) if action_id is not None else 0
-        tmp_path = self.command_file.with_suffix(".tmp")
-        self.command_file.parent.mkdir(parents=True, exist_ok=True)
-        with tmp_path.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        tmp_path.replace(self.command_file)
+        with self._command_lock:
+            pose = posture if posture is not None else ("stand" if self.is_standing else "sit")
+            payload = {"vx": cmd.vx, "vy": cmd.vy, "wz": cmd.wz, "posture": pose}
+            if action is not None:
+                payload["action"] = action
+                payload["action_id"] = int(action_id) if action_id is not None else 0
+            tmp_path = self.command_file.with_suffix(".tmp")
+            self.command_file.parent.mkdir(parents=True, exist_ok=True)
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            tmp_path.replace(self.command_file)
 
     def _cleanup(self) -> None:
         try:
@@ -128,41 +131,64 @@ class SimulationController(RobotInterface):
             pass
 
     def sit(self) -> None:
-        self.is_standing = False
-        self.latest_command = MotionCommand()
-        self._write_command(self.latest_command, posture="sit")
+        with self._command_lock:
+            self.is_standing = False
+            self.latest_command = MotionCommand()
+            self._write_command(self.latest_command, posture="sit")
 
     def stand(self) -> None:
-        self.is_standing = True
-        self.latest_command = MotionCommand()
-        self._write_command(self.latest_command, posture="stand")
+        with self._command_lock:
+            self.is_standing = True
+            self.latest_command = MotionCommand()
+            self._write_command(self.latest_command, posture="stand")
 
     def walk(self, vx: float, vy: float, yaw: float) -> None:
         if self.config.launch_simulator:
             self._ensure_simulator_running()
-        if not self.is_standing and self.config.auto_stand_on_walk:
-            self.stand()
-        self.latest_command = clamp_velocity(
-            MotionCommand(vx=vx, vy=vy, wz=yaw),
-            max_v=self.config.max_v,
-            max_wz=self.config.max_wz,
-        )
-        self._write_command(self.latest_command, posture="stand")
+        with self._command_lock:
+            if not self.is_standing and self.config.auto_stand_on_walk:
+                self.stand()
+            self.latest_command = clamp_velocity(
+                MotionCommand(vx=vx, vy=vy, wz=yaw),
+                max_v=self.config.max_v,
+                max_wz=self.config.max_wz,
+            )
+            self._write_command(self.latest_command, posture="stand")
 
     def stop(self) -> None:
-        self.latest_command = MotionCommand()
-        self._write_command(self.latest_command)
+        with self._command_lock:
+            self.latest_command = MotionCommand()
+            self._write_command(self.latest_command)
 
     def move(self, cmd: MotionCommand) -> None:
         self.walk(cmd.vx, cmd.vy, cmd.wz)
 
-    def flip(self) -> None:
+    def greet(self) -> None:
         if self.config.launch_simulator:
             self._ensure_simulator_running()
-        self.is_standing = True
-        self.latest_command = MotionCommand()
-        self._action_seq += 1
-        self._write_command(self.latest_command, posture="stand", action="flip", action_id=self._action_seq)
+        with self._command_lock:
+            self.is_standing = True
+            self.latest_command = MotionCommand()
+            self._action_seq += 1
+            self._write_command(self.latest_command, posture="stand", action="greet", action_id=self._action_seq)
+
+    def beg(self) -> None:
+        if self.config.launch_simulator:
+            self._ensure_simulator_running()
+        with self._command_lock:
+            self.is_standing = True
+            self.latest_command = MotionCommand()
+            self._action_seq += 1
+            self._write_command(self.latest_command, posture="stand", action="beg", action_id=self._action_seq)
+
+    def shake_hand(self) -> None:
+        if self.config.launch_simulator:
+            self._ensure_simulator_running()
+        with self._command_lock:
+            self.is_standing = True
+            self.latest_command = MotionCommand()
+            self._action_seq += 1
+            self._write_command(self.latest_command, posture="stand", action="shake_hand", action_id=self._action_seq)
 
 
 SimRobot = SimulationController

@@ -369,10 +369,6 @@ def main():
     external_action = None
     external_action_id = -1
     last_external_action_id = -1
-    flip_lock_until = 0.0
-    flip_anchor_x = 0.0
-    flip_anchor_y = 0.0
-    flip_anchor_yaw = 0.0
     idle_anchor_x = 0.0
     idle_anchor_y = 0.0
     idle_anchor_yaw = 0.0
@@ -412,7 +408,7 @@ def main():
         if posture not in {"stand", "sit"}:
             posture = "stand"
         action = str(payload.get("action", "")).strip().lower() or None
-        if action not in {None, "flip"}:
+        if action not in {None, "beg", "greet", "shake_hand"}:
             action = None
         try:
             action_id = int(payload.get("action_id", 0))
@@ -495,21 +491,15 @@ def main():
 
     reset_robot()
 
-    def execute_flip_action():
+    def execute_greet_action():
         nonlocal vx, vy, wz, target_vx, target_vy, target_wz, posture_blend, gait_phase, external_posture
-        nonlocal flip_lock_until, flip_anchor_x, flip_anchor_y, flip_anchor_yaw
         nonlocal idle_hold_active
         if not body_exists(robot):
             return
+
         try:
             pos0, orn0 = p.getBasePositionAndOrientation(robot)
-            _, pitch0, yaw0 = p.getEulerFromQuaternion(orn0)
-            lin0, ang0 = p.getBaseVelocity(robot)
-            p.resetBaseVelocity(
-                robot,
-                [0.18 * lin0[0], 0.18 * lin0[1], 0.0],
-                [0.0, 0.0, 0.10 * ang0[2]],
-            )
+            _, _, yaw0 = p.getEulerFromQuaternion(orn0)
         except p.error:
             return
 
@@ -518,35 +508,7 @@ def main():
         gait_phase = 0.0
         posture_blend = 1.0
         external_posture = "stand"
-        flip_anchor_x = pos0[0]
-        flip_anchor_y = pos0[1]
-        flip_anchor_yaw = yaw0
-        flip_lock_until = time.monotonic() + 3.00
         idle_hold_active = False
-
-        # Flip tuning: prioritize reliable single-flip landing and recovery.
-        pre_stabilize_duration = 0.26
-        crouch_duration = 0.28
-        launch_duration = 0.12
-        max_air_time = 0.64
-        open_duration = 0.60
-        landing_crouch_alpha = 0.68
-        landing_hold_min = 0.62
-        landing_hold_max = 2.60
-        landing_recover_max = 1.80
-        standup_duration = 1.20
-        settle_duration = 1.55
-
-        target_spin_rate = 6.35
-        launch_force_z = 178.0
-        launch_torque_y = 136.0
-        center_kp = 92.0
-        center_kd = 22.0
-        yaw_kp = 78.0
-        yaw_kd = 16.0
-        max_center_force = 48.0
-        max_yaw_torque = 30.0
-        hard_recover_roll_pitch = 0.84
 
         def angle_delta(a, b):
             return math.atan2(math.sin(a - b), math.cos(a - b))
@@ -555,393 +517,385 @@ def main():
             t = clamp(t, 0.0, 1.0)
             return t * t * (3.0 - 2.0 * t)
 
-        def stable_metrics_ok(roll, pitch, lin_vel, ang_vel, pitch_ref, strict=False):
-            if strict:
-                return (
-                    abs(roll) < 0.16
-                    and abs(pitch - pitch_ref) < 0.17
-                    and abs(ang_vel[0]) < 0.90
-                    and abs(ang_vel[1]) < 0.90
-                    and abs(lin_vel[0]) < 0.40
-                    and abs(lin_vel[1]) < 0.40
-                    and abs(lin_vel[2]) < 0.14
+        def build_greet_targets(bow, wag, bounce, nod):
+            targets = dict(stand_targets_by_id)
+
+            for leg in ("FR", "FL", "RR", "RL"):
+                joints = leg_joints.get(leg, {})
+                if not all(k in joints for k in ("hip", "upper", "lower")):
+                    continue
+                front_leg = leg in {"FR", "FL"}
+                right_leg = leg in {"FR", "RR"}
+                side = 1.0 if right_leg else -1.0
+                hip_id = joints["hip"]
+                upper_id = joints["upper"]
+                lower_id = joints["lower"]
+
+                if front_leg:
+                    hip_offset = side * 0.05 * wag
+                    upper_offset = 0.34 * bow - 0.08 * bounce + 0.08 * nod
+                    lower_offset = -0.56 * bow + 0.14 * bounce - 0.12 * nod
+                else:
+                    hip_offset = -side * 0.10 * wag
+                    upper_offset = -0.12 * bow - 0.10 * bounce - 0.04 * nod
+                    lower_offset = 0.24 * bow + 0.18 * bounce + 0.06 * nod
+
+                targets[hip_id] = clamp_joint(
+                    joint_name_by_id[hip_id],
+                    stand_targets_by_id[hip_id] + hip_offset,
                 )
-            return (
-                abs(roll) < 0.20
-                and abs(pitch - pitch_ref) < 0.22
-                and abs(ang_vel[0]) < 1.05
-                and abs(ang_vel[1]) < 1.05
-                and abs(lin_vel[0]) < 0.52
-                and abs(lin_vel[1]) < 0.52
-                and abs(lin_vel[2]) < 0.18
-            )
+                targets[upper_id] = clamp_joint(
+                    joint_name_by_id[upper_id],
+                    stand_targets_by_id[upper_id] + upper_offset,
+                )
+                targets[lower_id] = clamp_joint(
+                    joint_name_by_id[lower_id],
+                    stand_targets_by_id[lower_id] + lower_offset,
+                )
+            return targets
 
-        def apply_stabilizers(pos, yaw, lin_vel, ang_vel):
-            fx = clamp(-center_kp * (pos[0] - pos0[0]) - center_kd * lin_vel[0], -max_center_force, max_center_force)
-            fy = clamp(-center_kp * (pos[1] - pos0[1]) - center_kd * lin_vel[1], -max_center_force, max_center_force)
-            yaw_err = angle_delta(yaw0, yaw)
-            tz = clamp(yaw_kp * yaw_err - yaw_kd * ang_vel[2], -max_yaw_torque, max_yaw_torque)
-            if abs(fx) > 1e-6 or abs(fy) > 1e-6:
-                p.applyExternalForce(robot, -1, [fx, fy, 0.0], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-            if abs(tz) > 1e-6:
-                p.applyExternalTorque(robot, -1, [0.0, 0.0, tz], p.WORLD_FRAME)
-
-        def step_pose(alpha, force_z=0.0, torque_y=0.0, balance=False, rebound_damp=False, landing_bias=0.0):
+        def step_greet(bow, wag, bounce, nod):
             if not body_exists(robot):
                 return False
             try:
-                alpha = clamp(alpha, 0.0, 1.0)
-                apply_joint_targets(robot, blend_landing_pose(alpha, nose_up_bias=landing_bias))
                 pos, orn = p.getBasePositionAndOrientation(robot)
                 roll, pitch, yaw = p.getEulerFromQuaternion(orn)
                 lin_vel, ang_vel = p.getBaseVelocity(robot)
+            except p.error:
+                return False
 
-                apply_stabilizers(pos, yaw, lin_vel, ang_vel)
-                if force_z != 0.0:
-                    p.applyExternalForce(robot, -1, [0.0, 0.0, force_z], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-                if torque_y != 0.0:
-                    p.applyExternalTorque(robot, -1, [0.0, torque_y, 0.0], p.WORLD_FRAME)
-                # Rebound suppression is enabled only after touchdown; avoid
-                # damping while the robot is still in its aerial phase.
-                if rebound_damp and pos[2] < 0.44 and lin_vel[2] > 0.03:
-                    anti_bounce_z = clamp(-170.0 * lin_vel[2], -96.0, 0.0)
-                    p.applyExternalForce(robot, -1, [0.0, 0.0, anti_bounce_z], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-                if balance:
-                    tx = clamp(-96.0 * roll - 18.0 * ang_vel[0], -28.0, 28.0)
-                    ty = clamp(-138.0 * pitch - 24.0 * ang_vel[1], -44.0, 44.0)
-                    p.applyExternalTorque(robot, -1, [tx, ty, 0.0], p.WORLD_FRAME)
+            x_err = pos[0] - pos0[0]
+            y_err = pos[1] - pos0[1]
+            yaw_err = angle_delta(yaw0, yaw)
+            support_height = 0.43 - 0.040 * bow + 0.022 * bounce
+            fx = clamp(-176.0 * x_err - 40.0 * lin_vel[0], -78.0, 78.0)
+            fy = clamp(-188.0 * y_err - 40.0 * lin_vel[1], -88.0, 88.0)
+            fz = clamp(46.0 * (support_height - pos[2]) - 54.0 * lin_vel[2], -70.0, 46.0)
+            tx = clamp((-194.0 * roll - 36.0 * ang_vel[0]) + 18.0 * wag, -64.0, 64.0)
+            ty = clamp((-176.0 * pitch - 32.0 * ang_vel[1]) - 32.0 * bow + 14.0 * nod, -62.0, 62.0)
+            tz = clamp(128.0 * yaw_err - 24.0 * ang_vel[2] + 12.0 * wag, -44.0, 44.0)
 
+            try:
+                apply_joint_targets(robot, build_greet_targets(bow, wag, bounce, nod))
+                p.applyExternalForce(robot, -1, [fx, fy, fz], [0.0, 0.0, 0.0], p.WORLD_FRAME)
+                p.applyExternalTorque(robot, -1, [tx, ty, tz], p.WORLD_FRAME)
                 p.stepSimulation()
                 time.sleep(dt)
                 return True
             except p.error:
                 return False
 
-        pre_stabilize_steps = max(1, int(pre_stabilize_duration / dt))
-        for _ in range(pre_stabilize_steps):
-            if not body_exists(robot):
-                return
-            try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                _, _, yaw = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
-            except p.error:
-                return
-            apply_joint_targets(robot, blend_landing_pose(1.0, nose_up_bias=0.20))
-            apply_stabilizers(pos, yaw, lin_vel, ang_vel)
-            support_z = clamp(18.0 * (0.43 - pos[2]) - 38.0 * lin_vel[2], -36.0, 14.0)
-            p.applyExternalForce(robot, -1, [0.0, 0.0, support_z], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-            p.stepSimulation()
-            time.sleep(dt)
-
-        crouch_steps = max(1, int(crouch_duration / dt))
-        for i in range(crouch_steps):
-            # Smooth crouch before jump.
-            phase = (i + 1) / float(crouch_steps)
-            s = smoothstep01(phase)
-            alpha = 1.0 - 0.78 * s
-            if not step_pose(alpha, force_z=0.0, torque_y=0.0, balance=False):
+        settle_steps = max(1, int(0.22 / dt))
+        for _ in range(settle_steps):
+            if not step_greet(0.0, 0.0, 0.0, 0.0):
                 return
 
-        launch_steps = max(1, int(launch_duration / dt))
-        spin_sign = 1.0
-        for i in range(launch_steps):
-            # Strong takeoff + spin initiation.
-            phase = (i + 1) / float(launch_steps)
-            s = smoothstep01(phase)
-            alpha = 0.24 - 0.05 * s
-            force_z = launch_force_z * (1.0 - 0.32 * s)
-            torque_y = launch_torque_y * (1.0 - 0.18 * s)
-            if not step_pose(alpha, force_z=force_z, torque_y=torque_y, balance=False):
-                return
-            try:
-                _, ang_vel = p.getBaseVelocity(robot)
-                if i > launch_steps // 3 and abs(ang_vel[1]) > 0.5:
-                    spin_sign = 1.0 if ang_vel[1] >= 0.0 else -1.0
-            except p.error:
+        bow_steps = max(1, int(0.56 / dt))
+        for i in range(bow_steps):
+            phase = smoothstep01((i + 1) / float(bow_steps))
+            bow = math.sin(phase * math.pi) * 0.92
+            nod = math.sin(phase * math.pi * 2.0) * 0.38
+            if not step_greet(bow, 0.0, 0.0, nod):
                 return
 
-        # Clamp to a repeatable rotation speed so multiple flips look consistent.
+        wiggle_steps = max(1, int(1.30 / dt))
+        for i in range(wiggle_steps):
+            phase = (i + 1) / float(wiggle_steps)
+            wag = math.sin(phase * math.pi * 8.0)
+            bounce = 0.5 + 0.5 * math.sin(phase * math.pi * 6.0)
+            bow = 0.24 + 0.10 * math.sin(phase * math.pi * 2.0)
+            nod = math.sin(phase * math.pi * 4.0) * 0.24
+            if not step_greet(bow, wag, bounce, nod):
+                return
+
+        pop_steps = max(1, int(0.42 / dt))
+        for i in range(pop_steps):
+            phase = (i + 1) / float(pop_steps)
+            bounce = max(0.0, math.sin(phase * math.pi * 3.0))
+            nod = math.sin(phase * math.pi * 3.0) * 0.30
+            if not step_greet(0.0, 0.0, bounce, nod):
+                return
+
+        reset_steps = max(1, int(0.36 / dt))
+        for i in range(reset_steps):
+            phase = 1.0 - smoothstep01((i + 1) / float(reset_steps))
+            if not step_greet(0.18 * phase, 0.0, 0.0, 0.0):
+                return
+
+        settle_back_steps = max(1, int(0.26 / dt))
+        for _ in range(settle_back_steps):
+            if not step_greet(0.0, 0.0, 0.0, 0.0):
+                return
+
+    def execute_beg_action():
+        nonlocal vx, vy, wz, target_vx, target_vy, target_wz, posture_blend, gait_phase, external_posture
+        nonlocal idle_hold_active
+        if not body_exists(robot):
+            return
+
         try:
-            lin_vel, ang_vel = p.getBaseVelocity(robot)
-            p.resetBaseVelocity(
-                robot,
-                [0.0, 0.0, max(1.84, lin_vel[2])],
-                [0.0, spin_sign * target_spin_rate, 0.06 * ang_vel[2]],
-            )
+            pos0, orn0 = p.getBasePositionAndOrientation(robot)
+            _, pitch0, yaw0 = p.getEulerFromQuaternion(orn0)
         except p.error:
             return
 
-        # Mid-air tuck until almost one full rotation.
-        rot_acc = 0.0
-        prev_pitch = pitch0
-        midair_steps = max(1, int(max_air_time / dt))
-        for i in range(midair_steps):
-            if not body_exists(robot):
-                return
+        vx = vy = wz = 0.0
+        target_vx = target_vy = target_wz = 0.0
+        gait_phase = 0.0
+        posture_blend = 1.0
+        external_posture = "stand"
+        idle_hold_active = False
+        toe_link_by_leg = {}
+        for joint_id in range(p.getNumJoints(robot)):
+            link_name = p.getJointInfo(robot, joint_id)[12].decode("utf-8")
+            if link_name in {"toeFR", "toeFL", "toeRR", "toeRL"}:
+                toe_link_by_leg[link_name[-2:]] = joint_id
+
+        rear_anchor = None
+        if "RR" in toe_link_by_leg and "RL" in toe_link_by_leg:
             try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                _, pitch, yaw = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
+                rr_pos = p.getLinkState(robot, toe_link_by_leg["RR"])[0]
+                rl_pos = p.getLinkState(robot, toe_link_by_leg["RL"])[0]
+                rear_anchor = [
+                    (rr_pos[0] + rl_pos[0]) * 0.5,
+                    (rr_pos[1] + rl_pos[1]) * 0.5,
+                ]
             except p.error:
-                return
+                rear_anchor = None
 
-            rot_acc += abs(angle_delta(pitch, prev_pitch))
-            prev_pitch = pitch
-            rate_err = target_spin_rate - abs(ang_vel[1])
-            torque_y = spin_sign * clamp(70.0 * rate_err, -120.0, 145.0)
-            # Light support in early mid-air only; avoids "catapult" look.
-            support = 30.0 if i < int(0.30 * midair_steps) else 6.0
+        def smoothstep01(t):
+            t = clamp(t, 0.0, 1.0)
+            return t * t * (3.0 - 2.0 * t)
 
-            if not step_pose(0.14, force_z=support, torque_y=torque_y, balance=False):
-                return
+        def build_beg_targets(rise, paw):
+            targets = dict(stand_targets_by_id)
 
-            if rot_acc >= 2.0 * math.pi * 0.92:
-                break
+            for leg in ("FR", "FL", "RR", "RL"):
+                joints = leg_joints.get(leg, {})
+                if not all(k in joints for k in ("hip", "upper", "lower")):
+                    continue
+                front_leg = leg in {"FR", "FL"}
+                side = -1.0 if leg in {"FR", "RR"} else 1.0
+                hip_id = joints["hip"]
+                upper_id = joints["upper"]
+                lower_id = joints["lower"]
 
-        # Open body and brake rotation for clean touchdown.
-        touchdown = False
-        touchdown_frames = 0
-        open_steps = max(1, int(open_duration / dt))
-        for i in range(open_steps):
-            if not body_exists(robot):
-                return
-            try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                _, pitch, _ = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
-                contacts = p.getContactPoints(bodyA=robot, bodyB=plane)
-                if contacts:
-                    touchdown = True
-                    touchdown_frames += 1
-            except p.error:
-                return
-
-            phase = (i + 1) / float(open_steps)
-            s = smoothstep01(phase)
-            alpha = 0.16 + (landing_crouch_alpha - 0.16) * s
-            target_rate = max(0.85, target_spin_rate * (1.0 - s))
-            rate_err = target_rate - abs(ang_vel[1])
-            torque_y = spin_sign * clamp(118.0 * rate_err, -250.0, 105.0)
-            if abs(pitch - pitch0) > 0.75:
-                torque_y += -spin_sign * 30.0
-
-            support_z = clamp(20.0 * (0.42 - pos[2]) - 30.0 * lin_vel[2], -28.0, 14.0)
-            if touchdown or (pos[2] < 0.42 and lin_vel[2] < 0.15):
-                # Land in a controlled crouch to absorb impact instead of bouncing.
-                touchdown_blend = clamp(touchdown_frames / 6.0, 0.0, 1.0)
-                alpha = max(alpha, landing_crouch_alpha + 0.07 * touchdown_blend)
-                pitch_err_td = pitch0 - pitch
-                torque_y = spin_sign * clamp(
-                    202.0 * rate_err + 74.0 * pitch_err_td - 38.0 * spin_sign,
-                    -320.0,
-                    70.0,
-                )
-                support_z = clamp(24.0 * (0.41 - pos[2]) - 78.0 * lin_vel[2], -82.0, 20.0)
-                landing_bias = 0.82 + 0.16 * touchdown_blend
-            else:
-                landing_bias = 0.28
-
-            if not step_pose(
-                alpha,
-                force_z=support_z,
-                torque_y=torque_y,
-                balance=touchdown,
-                rebound_damp=touchdown,
-                landing_bias=landing_bias,
-            ):
-                return
-            if touchdown and abs(pitch - pitch0) < 0.28 and abs(ang_vel[1]) < 1.25:
-                break
-
-        # Touchdown absorb: keep a half-squat until robot is stably settled.
-        hold_steps_min = max(1, int(landing_hold_min / dt))
-        hold_steps_max = max(hold_steps_min, int(landing_hold_max / dt))
-        stable_frames_needed = max(1, int(0.24 / dt))
-        stable_frames = 0
-        for i in range(hold_steps_max):
-            if not body_exists(robot):
-                return
-            try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                roll, pitch, _ = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
-                contacts = p.getContactPoints(bodyA=robot, bodyB=plane)
-                if contacts:
-                    touchdown = True
-            except p.error:
-                return
-
-            t = (i + 1) / float(hold_steps_max)
-            s = smoothstep01(t)
-            alpha = landing_crouch_alpha + 0.06 * s
-            pitch_err = pitch0 - pitch
-            support_z = clamp(32.0 * (0.39 - pos[2]) - 95.0 * lin_vel[2], -122.0, 28.0)
-            torque_y = clamp(-228.0 * ang_vel[1] + 134.0 * pitch_err, -174.0, 174.0)
-            landing_bias = 0.96 - 0.20 * s
-            if not step_pose(
-                alpha,
-                force_z=support_z,
-                torque_y=torque_y,
-                balance=True,
-                rebound_damp=True,
-                landing_bias=landing_bias,
-            ):
-                return
-            stable_now = touchdown and stable_metrics_ok(
-                roll,
-                pitch,
-                lin_vel,
-                ang_vel,
-                pitch0,
-                strict=False,
-            )
-            if stable_now:
-                stable_frames += 1
-            else:
-                stable_frames = 0
-            if i + 1 >= hold_steps_min and stable_frames >= stable_frames_needed:
-                break
-
-        landing_stable = stable_frames >= stable_frames_needed
-        if not landing_stable:
-            # If still unstable, keep crouch and keep damping until stability is reached.
-            recover_steps = max(1, int(landing_recover_max / dt))
-            for _ in range(recover_steps):
-                if not body_exists(robot):
-                    return
-                try:
-                    pos, orn = p.getBasePositionAndOrientation(robot)
-                    roll, pitch, _ = p.getEulerFromQuaternion(orn)
-                    lin_vel, ang_vel = p.getBaseVelocity(robot)
-                    contacts = p.getContactPoints(bodyA=robot, bodyB=plane)
-                    if contacts:
-                        touchdown = True
-                except p.error:
-                    return
-
-                pitch_err = pitch0 - pitch
-                support_z = clamp(34.0 * (0.39 - pos[2]) - 106.0 * lin_vel[2], -132.0, 30.0)
-                torque_y = clamp(-244.0 * ang_vel[1] + 146.0 * pitch_err, -188.0, 188.0)
-                if not step_pose(
-                    landing_crouch_alpha + 0.02,
-                    force_z=support_z,
-                    torque_y=torque_y,
-                    balance=True,
-                    rebound_damp=True,
-                    landing_bias=0.94,
-                ):
-                    return
-                stable_now = touchdown and stable_metrics_ok(
-                    roll,
-                    pitch,
-                    lin_vel,
-                    ang_vel,
-                    pitch0,
-                    strict=False,
-                )
-                if stable_now:
-                    stable_frames += 1
+                if front_leg:
+                    final_hip = side * (0.10 + 0.02 * paw)
+                    final_upper = 1.42 + 0.06 * paw
+                    final_lower = -2.48 - 0.08 * max(0.0, paw)
                 else:
-                    stable_frames = 0
-                if stable_frames >= stable_frames_needed:
-                    landing_stable = True
-                    break
+                    final_hip = side * 0.12
+                    final_upper = 0.98
+                    final_lower = -2.04
 
-        # Stand up only after the half-squat phase is truly stable.
-        standup_steps_target = max(1, int(standup_duration / dt))
-        standup_steps_max = standup_steps_target * 2
-        stand_progress = 0.0
-        stand_stable_frames = 0
-        stand_stable_frames_needed = max(1, int(0.18 / dt))
-        for _ in range(standup_steps_max):
+                targets[hip_id] = clamp_joint(
+                    joint_name_by_id[hip_id],
+                    stand_targets_by_id[hip_id] + (final_hip - stand_targets_by_id[hip_id]) * rise,
+                )
+                targets[upper_id] = clamp_joint(
+                    joint_name_by_id[upper_id],
+                    stand_targets_by_id[upper_id] + (final_upper - stand_targets_by_id[upper_id]) * rise,
+                )
+                targets[lower_id] = clamp_joint(
+                    joint_name_by_id[lower_id],
+                    stand_targets_by_id[lower_id] + (final_lower - stand_targets_by_id[lower_id]) * rise,
+                )
+            return targets
+
+        def step_beg(rise, paw):
             if not body_exists(robot):
-                return
+                return False
+
             try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                roll, pitch, _ = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
-                contacts = p.getContactPoints(bodyA=robot, bodyB=plane)
-                if contacts:
-                    touchdown = True
+                targets = build_beg_targets(rise, paw)
+                for joint_id, target in targets.items():
+                    p.resetJointState(robot, joint_id, target)
+
+                target_pitch = pitch0 - 0.72 * rise + 0.025 * paw * rise
+                target_orn = p.getQuaternionFromEuler([0.0, target_pitch, yaw0])
+                target_pos = [pos0[0], pos0[1], pos0[2]]
+                p.resetBasePositionAndOrientation(robot, target_pos, target_orn)
+
+                if rear_anchor is not None:
+                    rr_pos = p.getLinkState(robot, toe_link_by_leg["RR"])[0]
+                    rl_pos = p.getLinkState(robot, toe_link_by_leg["RL"])[0]
+                    rear_mid_x = (rr_pos[0] + rl_pos[0]) * 0.5
+                    rear_mid_y = (rr_pos[1] + rl_pos[1]) * 0.5
+                    rear_min_z = min(rr_pos[2], rl_pos[2])
+                    target_pos = [
+                        target_pos[0] + rear_anchor[0] - rear_mid_x,
+                        target_pos[1] + rear_anchor[1] - rear_mid_y,
+                        target_pos[2] + 0.035 - rear_min_z,
+                    ]
+                    p.resetBasePositionAndOrientation(robot, target_pos, target_orn)
+
+                p.resetBaseVelocity(robot, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+                p.stepSimulation()
+                time.sleep(dt)
+                return True
             except p.error:
+                return False
+
+        settle_steps = max(1, int(0.26 / dt))
+        for _ in range(settle_steps):
+            if not step_beg(0.0, 0.0):
                 return
 
-            strict_ok = touchdown and stable_metrics_ok(
-                roll,
-                pitch,
-                lin_vel,
-                ang_vel,
-                pitch0,
-                strict=True,
-            )
-            if landing_stable and strict_ok:
-                stand_progress = min(1.0, stand_progress + (1.0 / standup_steps_target))
-                stand_stable_frames += 1
-            else:
-                stand_progress = max(0.0, stand_progress - (1.8 / standup_steps_target))
-                stand_stable_frames = 0
+        rise_steps = max(1, int(0.68 / dt))
+        for i in range(rise_steps):
+            phase = smoothstep01((i + 1) / float(rise_steps))
+            if not step_beg(phase, 0.0):
+                return
 
-            s = smoothstep01(stand_progress)
-            alpha = landing_crouch_alpha + (1.0 - landing_crouch_alpha) * s
-            pitch_err = pitch0 - pitch
-            support_z = clamp(26.0 * (0.40 - pos[2]) - 74.0 * lin_vel[2], -96.0, 24.0)
-            torque_y = clamp(-166.0 * ang_vel[1] + 112.0 * pitch_err, -136.0, 136.0)
-            landing_bias = 0.86 - 0.62 * s
-            if not step_pose(
-                alpha,
-                force_z=support_z,
-                torque_y=torque_y,
-                balance=True,
-                rebound_damp=True,
-                landing_bias=landing_bias,
+        hold_steps = max(1, int(1.20 / dt))
+        for i in range(hold_steps):
+            phase = (i + 1) / float(hold_steps)
+            paw = math.sin(phase * math.pi * 5.0)
+            if not step_beg(1.0, paw):
+                return
+
+        lower_steps = max(1, int(0.60 / dt))
+        for i in range(lower_steps):
+            phase = 1.0 - smoothstep01((i + 1) / float(lower_steps))
+            if not step_beg(phase, 0.0):
+                return
+
+        settle_back_steps = max(1, int(0.32 / dt))
+        for _ in range(settle_back_steps):
+            if not step_beg(0.0, 0.0):
+                return
+
+    def execute_shake_hand_action():
+        nonlocal vx, vy, wz, target_vx, target_vy, target_wz, posture_blend, gait_phase, external_posture
+        nonlocal idle_hold_active
+        if not body_exists(robot):
+            return
+
+        fr_joints = leg_joints.get("FR", {})
+        if not all(k in fr_joints for k in ("hip", "upper", "lower")):
+            return
+
+        try:
+            pos0, orn0 = p.getBasePositionAndOrientation(robot)
+            _, _, yaw0 = p.getEulerFromQuaternion(orn0)
+        except p.error:
+            return
+
+        vx = vy = wz = 0.0
+        target_vx = target_vy = target_wz = 0.0
+        gait_phase = 0.0
+        posture_blend = 1.0
+        external_posture = "stand"
+        idle_hold_active = False
+
+        def angle_delta(a, b):
+            return math.atan2(math.sin(a - b), math.cos(a - b))
+
+        def smoothstep01(t):
+            t = clamp(t, 0.0, 1.0)
+            return t * t * (3.0 - 2.0 * t)
+
+        def build_shake_targets(lift, wave):
+            targets = dict(stand_targets_by_id)
+
+            for leg, hip_offset, upper_offset, lower_offset in (
+                ("FL", 0.04, -0.04, 0.06),
+                ("RR", 0.02, -0.03, 0.04),
+                ("RL", 0.02, -0.03, 0.04),
             ):
-                return
-            if stand_progress >= 0.999 and stand_stable_frames >= stand_stable_frames_needed:
-                break
+                joints = leg_joints.get(leg, {})
+                if not all(k in joints for k in ("hip", "upper", "lower")):
+                    continue
+                hip_id = joints["hip"]
+                upper_id = joints["upper"]
+                lower_id = joints["lower"]
+                targets[hip_id] = clamp_joint(
+                    joint_name_by_id[hip_id],
+                    stand_targets_by_id[hip_id] + hip_offset * lift,
+                )
+                targets[upper_id] = clamp_joint(
+                    joint_name_by_id[upper_id],
+                    stand_targets_by_id[upper_id] + upper_offset * lift,
+                )
+                targets[lower_id] = clamp_joint(
+                    joint_name_by_id[lower_id],
+                    stand_targets_by_id[lower_id] + lower_offset * lift,
+                )
 
-        # Ground settle: damp remaining wobble after full stand-up.
-        settle_steps = max(1, int(settle_duration / dt))
-        for i in range(settle_steps):
+            hip_id = fr_joints["hip"]
+            upper_id = fr_joints["upper"]
+            lower_id = fr_joints["lower"]
+            hip = stand_targets_by_id[hip_id] + 0.16 * lift + 0.05 * wave
+            upper = stand_targets_by_id[upper_id] + 0.48 * lift + 0.08 * wave
+            lower = stand_targets_by_id[lower_id] - 0.94 * lift - 0.14 * wave
+            targets[hip_id] = clamp_joint(joint_name_by_id[hip_id], hip)
+            targets[upper_id] = clamp_joint(joint_name_by_id[upper_id], upper)
+            targets[lower_id] = clamp_joint(joint_name_by_id[lower_id], lower)
+            return targets
+
+        def step_handshake(lift, wave):
             if not body_exists(robot):
-                return
+                return False
             try:
                 pos, orn = p.getBasePositionAndOrientation(robot)
                 roll, pitch, yaw = p.getEulerFromQuaternion(orn)
                 lin_vel, ang_vel = p.getBaseVelocity(robot)
             except p.error:
-                return
+                return False
 
-            settle_phase = (i + 1) / float(settle_steps)
-            settle_blend = 1.0 - smoothstep01(settle_phase)
-            unstable = abs(roll) > hard_recover_roll_pitch or abs(pitch) > hard_recover_roll_pitch or pos[2] < 0.16
-            support_z = clamp(24.0 * (0.41 - pos[2]) - 56.0 * lin_vel[2], -56.0, 22.0)
+            x_err = pos[0] - pos0[0]
+            y_err = pos[1] - pos0[1]
             yaw_err = angle_delta(yaw0, yaw)
-            pitch_err = pitch0 - pitch
-            braking_torque_y = clamp(-148.0 * ang_vel[1] + 94.0 * pitch_err, -120.0, 120.0)
-            braking_torque_y *= (0.65 + 0.35 * settle_blend)
-            if abs(yaw_err) > 0.25:
-                braking_torque_y *= 0.85
-            if unstable:
-                # Natural recovery attempt: stronger damping, but no teleport/reset.
-                support_z = clamp(24.0 * (0.39 - pos[2]) - 84.0 * lin_vel[2], -96.0, 18.0)
-                braking_torque_y = clamp(-188.0 * ang_vel[1] + 124.0 * pitch_err, -152.0, 152.0)
-            landing_bias = 0.68 - 0.42 * (1.0 - settle_blend)
-            settle_alpha = 0.92 + 0.08 * (1.0 - settle_blend)
-            if not step_pose(
-                settle_alpha,
-                force_z=support_z,
-                torque_y=braking_torque_y,
-                balance=True,
-                rebound_damp=True,
-                landing_bias=landing_bias,
-            ):
+            support_height = 0.43 + 0.02 * lift
+            fx = clamp(-168.0 * x_err - 38.0 * lin_vel[0], -72.0, 72.0)
+            fy = clamp(-182.0 * y_err - 38.0 * lin_vel[1], -84.0, 84.0)
+            fz = clamp(44.0 * (support_height - pos[2]) - 52.0 * lin_vel[2], -66.0, 42.0)
+            tx = clamp(-190.0 * roll - 34.0 * ang_vel[0], -58.0, 58.0)
+            ty = clamp(-178.0 * pitch - 32.0 * ang_vel[1], -54.0, 54.0)
+            tz = clamp(124.0 * yaw_err - 24.0 * ang_vel[2], -42.0, 42.0)
+
+            try:
+                apply_joint_targets(robot, build_shake_targets(lift, wave))
+                p.applyExternalForce(robot, -1, [fx, fy, fz], [0.0, 0.0, 0.0], p.WORLD_FRAME)
+                p.applyExternalTorque(robot, -1, [tx, ty, tz], p.WORLD_FRAME)
+                p.stepSimulation()
+                time.sleep(dt)
+                return True
+            except p.error:
+                return False
+
+        settle_steps = max(1, int(0.30 / dt))
+        for _ in range(settle_steps):
+            if not step_handshake(0.0, 0.0):
                 return
 
-        flip_lock_until = max(flip_lock_until, time.monotonic() + 2.20)
+        raise_steps = max(1, int(0.42 / dt))
+        for i in range(raise_steps):
+            phase = smoothstep01((i + 1) / float(raise_steps))
+            if not step_handshake(phase, 0.0):
+                return
+
+        wave_steps = max(1, int(1.25 / dt))
+        for i in range(wave_steps):
+            phase = (i + 1) / float(wave_steps)
+            wave = math.sin(phase * math.pi * 6.0)
+            if not step_handshake(1.0, wave):
+                return
+
+        lower_steps = max(1, int(0.40 / dt))
+        for i in range(lower_steps):
+            phase = 1.0 - smoothstep01((i + 1) / float(lower_steps))
+            if not step_handshake(phase, 0.0):
+                return
+
+        settle_back_steps = max(1, int(0.28 / dt))
+        for _ in range(settle_back_steps):
+            if not step_handshake(0.0, 0.0):
+                return
 
     def apply_base_cmd(vx_cmd, vy_cmd, wz_cmd):
-        nonlocal gait_phase, external_posture, posture_blend, flip_lock_until
+        nonlocal gait_phase, external_posture, posture_blend
         nonlocal idle_anchor_x, idle_anchor_y, idle_anchor_yaw, idle_hold_active
         if not body_exists(robot):
             return False
@@ -950,29 +904,7 @@ def main():
             roll, pitch, yaw = p.getEulerFromQuaternion(orn)
             lin_vel, ang_vel = p.getBaseVelocity(robot)
 
-            in_flip_lock = (
-                time.monotonic() < flip_lock_until
-                and max(abs(vx_cmd), abs(vy_cmd), abs(wz_cmd)) < 0.03
-            )
-            if in_flip_lock:
-                apply_joint_targets(robot, blend_landing_pose(1.0, nose_up_bias=0.56))
-                x_err = pos[0] - flip_anchor_x
-                y_err = pos[1] - flip_anchor_y
-                yaw_err = math.atan2(math.sin(flip_anchor_yaw - yaw), math.cos(flip_anchor_yaw - yaw))
-                fx = clamp(-168.0 * x_err - 42.0 * lin_vel[0], -92.0, 92.0)
-                fy = clamp(-168.0 * y_err - 42.0 * lin_vel[1], -92.0, 92.0)
-                fz = clamp(20.0 * (0.41 - pos[2]) - 70.0 * lin_vel[2], -88.0, 18.0)
-                tx = clamp(-220.0 * roll - 42.0 * ang_vel[0], -66.0, 66.0)
-                ty = clamp(-328.0 * pitch - 72.0 * ang_vel[1], -124.0, 124.0)
-                tz = clamp(150.0 * yaw_err - 28.0 * ang_vel[2], -48.0, 48.0)
-                if abs(roll) > 0.36 or abs(pitch) > 0.36:
-                    flip_lock_until = max(flip_lock_until, time.monotonic() + 0.45)
-                    ty = clamp(ty * 1.20, -136.0, 136.0)
-                p.applyExternalForce(robot, -1, [fx, fy, fz], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-                p.applyExternalTorque(robot, -1, [tx, ty, tz], p.WORLD_FRAME)
-                return True
             if max(abs(vx_cmd), abs(vy_cmd), abs(wz_cmd)) >= 0.03:
-                flip_lock_until = 0.0
                 idle_hold_active = False
 
             desired_posture_blend = 0.0 if (external_cmd_file and external_posture == "sit") else 1.0
@@ -1245,7 +1177,7 @@ def main():
             return False
 
     if external_cmd_file:
-        print("[quad_sim] commands come from main.py (follow/patrol/greet/flip/sit/stand/stop)")
+        print("[quad_sim] commands come from main.py (follow/patrol/greet/beg/shake_hand/sit/stand/stop)")
     else:
         print("Controls: W/S forward/back, Q/E strafe, A/D rotate, Space stop, R reset, Esc quit")
     if stairs_mode:
@@ -1325,9 +1257,17 @@ def main():
                 external_action_id = external_cmd["action_id"]
                 if external_posture == "sit":
                     target_vx = target_vy = target_wz = 0.0
-                if external_action == "flip" and external_action_id > last_external_action_id:
+                if external_action == "beg" and external_action_id > last_external_action_id:
                     last_external_action_id = external_action_id
-                    execute_flip_action()
+                    execute_beg_action()
+                    target_vx = target_vy = target_wz = 0.0
+                if external_action == "greet" and external_action_id > last_external_action_id:
+                    last_external_action_id = external_action_id
+                    execute_greet_action()
+                    target_vx = target_vy = target_wz = 0.0
+                if external_action == "shake_hand" and external_action_id > last_external_action_id:
+                    last_external_action_id = external_action_id
+                    execute_shake_hand_action()
                     target_vx = target_vy = target_wz = 0.0
                 w_down = s_down = q_down = e_down = a_down = d_down = False
 

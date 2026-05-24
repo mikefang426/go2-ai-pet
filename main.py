@@ -1,13 +1,15 @@
 import argparse
 
 from ai.llm_agent import LLMAgent
+from behavior.beg import Beg
 from behavior.follow_user import FollowUser
-from behavior.flip import Flip
 from behavior.greet_person import GreetPerson
 from behavior.patrol import Patrol
+from behavior.shake_hand import ShakeHand
 from behavior.sit import Sit
 from behavior.stand import Stand
 from interfaces.robot_interface import RobotInterface
+from planner.behavior_runner import BehaviorRunner
 
 
 def build_robot(mode: str) -> RobotInterface:
@@ -26,36 +28,54 @@ def main() -> None:
 
     controller = build_robot(args.mode)
     agent = LLMAgent()
+    runner = BehaviorRunner(controller)
 
     behaviors = {
-        "flip": Flip(),
+        "beg": Beg(),
         "greet_person": GreetPerson(),
         "follow_user": FollowUser(),
         "patrol": Patrol(),
+        "shake_hand": ShakeHand(),
         "sit": Sit(),
         "stand": Stand(),
     }
 
     print(
         f"GO2 AI Pet started in {args.mode} mode. "
-        "Enter a command, e.g.: follow / patrol / greet / flip / sit / stand / stop"
+        "Enter a command, e.g.: follow / patrol / greet / shake hand / beg / sit / stand / stop"
     )
-    while True:
-        user_text = input("> ").strip()
-        if user_text in {"exit", "quit"}:
-            controller.stop()
-            break
 
-        intent = agent.infer_intent(user_text)
-        if intent.name == "stop":
-            controller.stop()
-            continue
+    def shutdown() -> None:
+        runner.stop()
+        controller.stop()
 
-        behavior = behaviors.get(intent.name)
-        if behavior is None:
-            print(f"Unknown intent: {intent.name}")
-            continue
-        behavior.run(controller)
+    try:
+        while True:
+            user_text = input("> ").strip()
+            if not user_text:
+                continue
+            if user_text in {"exit", "quit"}:
+                shutdown()
+                break
+
+            intent = agent.infer_intent(user_text)
+            if intent.name == "stop":
+                shutdown()
+                continue
+
+            behavior = behaviors.get(intent.name)
+            if behavior is None:
+                print(f"Unknown intent: {intent.name}")
+                continue
+            if not runner.start(intent.name, behavior):
+                print(f"Could not start {intent.name}: active behavior did not stop in time.")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        shutdown()
+    finally:
+        if runner.is_running:
+            runner.stop()
+            controller.stop()
 
 
 if __name__ == "__main__":
