@@ -14,7 +14,7 @@ A home robotics project combining:
 - Simulation-first development (no hardware required)
 - Modular architecture (AI / behavior / robot / vision / voice)
 - Command-based robot control
-- Built-in behaviors like greet, beg, shake hand, sit, stand, follow, and patrol
+- Built-in behaviors like greet, sit, stand, follow, and patrol
 - Extensible to real Go2 robot
 
 ---
@@ -32,6 +32,18 @@ Environment knobs:
 - `PATROL_PAUSE_SEC` pause between segments, default `0.35`
 - `PATROL_STEP_SEC` command refresh interval, default `0.1`
 - `PATROL_LOOPS` finite route count; unset or `0` means patrol until interrupted
+
+---
+
+## Follow Behavior
+
+`follow` starts a low-speed forward follow behavior in the background. It refreshes the movement command until `stop`, `exit`, or another behavior interrupts it, then it sends a stop command before exiting.
+
+Environment knobs:
+
+- `FOLLOW_VX` forward speed, default `0.26`
+- `FOLLOW_MAX_V` maximum allowed forward speed, default `0.35`
+- `FOLLOW_COMMAND_INTERVAL` command refresh interval, default `0.1`
 
 ---
 

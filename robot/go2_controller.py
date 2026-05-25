@@ -1,3 +1,5 @@
+import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,7 +52,7 @@ class Go2Controller(RobotInterface):
 
     def sit(self) -> None:
         self.ensure_connected()
-        self.client.StandDown()
+        self.client.Sit()
 
     def walk(self, vx: float, vy: float, yaw: float) -> None:
         self.move(MotionCommand(vx=vx, vy=vy, wz=yaw))
@@ -59,6 +61,20 @@ class Go2Controller(RobotInterface):
         self.ensure_connected()
         safe = clamp_velocity(cmd, max_v=self.config.max_v, max_wz=self.config.max_wz)
         self.client.Move(safe.vx, safe.vy, safe.wz)
+
+    def greet(self) -> None:
+        """Hardware-safe greeting using Unitree's high-level Hello preset."""
+        self.ensure_connected()
+        self._call_sport_action("StopMove")
+        self._call_sport_action("Hello")
+        time.sleep(float(os.getenv("GO2_GREET_GESTURE_SEC", "1.20")))
+        self._call_sport_action("StopMove")
+
+    def _call_sport_action(self, name: str) -> None:
+        fn = getattr(self.client, name, None)
+        if not callable(fn):
+            raise AttributeError(f"SportClient does not provide required high-level action {name}")
+        fn()
 
 
 Go2Robot = Go2Controller

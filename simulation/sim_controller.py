@@ -172,23 +172,5 @@ class SimulationController(RobotInterface):
             self._action_seq += 1
             self._write_command(self.latest_command, posture="stand", action="greet", action_id=self._action_seq)
 
-    def beg(self) -> None:
-        if self.config.launch_simulator:
-            self._ensure_simulator_running()
-        with self._command_lock:
-            self.is_standing = True
-            self.latest_command = MotionCommand()
-            self._action_seq += 1
-            self._write_command(self.latest_command, posture="stand", action="beg", action_id=self._action_seq)
-
-    def shake_hand(self) -> None:
-        if self.config.launch_simulator:
-            self._ensure_simulator_running()
-        with self._command_lock:
-            self.is_standing = True
-            self.latest_command = MotionCommand()
-            self._action_seq += 1
-            self._write_command(self.latest_command, posture="stand", action="shake_hand", action_id=self._action_seq)
-
 
 SimRobot = SimulationController

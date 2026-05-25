@@ -1,11 +1,9 @@
 import argparse
 
 from ai.llm_agent import LLMAgent
-from behavior.beg import Beg
 from behavior.follow_user import FollowUser
 from behavior.greet_person import GreetPerson
 from behavior.patrol import Patrol
-from behavior.shake_hand import ShakeHand
 from behavior.sit import Sit
 from behavior.stand import Stand
 from interfaces.robot_interface import RobotInterface
@@ -31,18 +29,16 @@ def main() -> None:
     runner = BehaviorRunner(controller)
 
     behaviors = {
-        "beg": Beg(),
         "greet_person": GreetPerson(),
         "follow_user": FollowUser(),
         "patrol": Patrol(),
-        "shake_hand": ShakeHand(),
         "sit": Sit(),
         "stand": Stand(),
     }
 
     print(
         f"GO2 AI Pet started in {args.mode} mode. "
-        "Enter a command, e.g.: follow / patrol / greet / shake hand / beg / sit / stand / stop"
+        "Enter a command, e.g.: follow / patrol / greet / sit / stand / stop"
     )
 
     def shutdown() -> None:

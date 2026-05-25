@@ -60,24 +60,6 @@ class SimulationControllerTests(unittest.TestCase):
             self.assertEqual(payload["posture"], "stand")
             self.assertGreater(payload["action_id"], 0)
 
-    def test_beg_writes_dedicated_sim_action(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            command_file = Path(tmp_dir) / "command.json"
-            controller = SimulationController(
-                SimulationControllerConfig(
-                    launch_simulator=False,
-                    command_file=str(command_file),
-                )
-            )
-
-            controller.beg()
-
-            with command_file.open("r", encoding="utf-8") as fh:
-                payload = json.load(fh)
-            self.assertEqual(payload["action"], "beg")
-            self.assertEqual(payload["posture"], "stand")
-            self.assertGreater(payload["action_id"], 0)
-
 
 if __name__ == "__main__":
     unittest.main()

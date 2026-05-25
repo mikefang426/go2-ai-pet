@@ -73,11 +73,10 @@ Behaviors should:
 
 Examples:
 
-- shake_hand
+- greet
 - follow_user
 - sit
 - patrol
-- dance
 
 ---
 

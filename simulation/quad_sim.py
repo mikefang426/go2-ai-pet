@@ -408,7 +408,7 @@ def main():
         if posture not in {"stand", "sit"}:
             posture = "stand"
         action = str(payload.get("action", "")).strip().lower() or None
-        if action not in {None, "beg", "greet", "shake_hand"}:
+        if action not in {None, "greet"}:
             action = None
         try:
             action_id = int(payload.get("action_id", 0))
@@ -625,273 +625,6 @@ def main():
         settle_back_steps = max(1, int(0.26 / dt))
         for _ in range(settle_back_steps):
             if not step_greet(0.0, 0.0, 0.0, 0.0):
-                return
-
-    def execute_beg_action():
-        nonlocal vx, vy, wz, target_vx, target_vy, target_wz, posture_blend, gait_phase, external_posture
-        nonlocal idle_hold_active
-        if not body_exists(robot):
-            return
-
-        try:
-            pos0, orn0 = p.getBasePositionAndOrientation(robot)
-            _, pitch0, yaw0 = p.getEulerFromQuaternion(orn0)
-        except p.error:
-            return
-
-        vx = vy = wz = 0.0
-        target_vx = target_vy = target_wz = 0.0
-        gait_phase = 0.0
-        posture_blend = 1.0
-        external_posture = "stand"
-        idle_hold_active = False
-        toe_link_by_leg = {}
-        for joint_id in range(p.getNumJoints(robot)):
-            link_name = p.getJointInfo(robot, joint_id)[12].decode("utf-8")
-            if link_name in {"toeFR", "toeFL", "toeRR", "toeRL"}:
-                toe_link_by_leg[link_name[-2:]] = joint_id
-
-        rear_anchor = None
-        if "RR" in toe_link_by_leg and "RL" in toe_link_by_leg:
-            try:
-                rr_pos = p.getLinkState(robot, toe_link_by_leg["RR"])[0]
-                rl_pos = p.getLinkState(robot, toe_link_by_leg["RL"])[0]
-                rear_anchor = [
-                    (rr_pos[0] + rl_pos[0]) * 0.5,
-                    (rr_pos[1] + rl_pos[1]) * 0.5,
-                ]
-            except p.error:
-                rear_anchor = None
-
-        def smoothstep01(t):
-            t = clamp(t, 0.0, 1.0)
-            return t * t * (3.0 - 2.0 * t)
-
-        def build_beg_targets(rise, paw):
-            targets = dict(stand_targets_by_id)
-
-            for leg in ("FR", "FL", "RR", "RL"):
-                joints = leg_joints.get(leg, {})
-                if not all(k in joints for k in ("hip", "upper", "lower")):
-                    continue
-                front_leg = leg in {"FR", "FL"}
-                side = -1.0 if leg in {"FR", "RR"} else 1.0
-                hip_id = joints["hip"]
-                upper_id = joints["upper"]
-                lower_id = joints["lower"]
-
-                if front_leg:
-                    final_hip = side * (0.10 + 0.02 * paw)
-                    final_upper = 1.42 + 0.06 * paw
-                    final_lower = -2.48 - 0.08 * max(0.0, paw)
-                else:
-                    final_hip = side * 0.12
-                    final_upper = 0.98
-                    final_lower = -2.04
-
-                targets[hip_id] = clamp_joint(
-                    joint_name_by_id[hip_id],
-                    stand_targets_by_id[hip_id] + (final_hip - stand_targets_by_id[hip_id]) * rise,
-                )
-                targets[upper_id] = clamp_joint(
-                    joint_name_by_id[upper_id],
-                    stand_targets_by_id[upper_id] + (final_upper - stand_targets_by_id[upper_id]) * rise,
-                )
-                targets[lower_id] = clamp_joint(
-                    joint_name_by_id[lower_id],
-                    stand_targets_by_id[lower_id] + (final_lower - stand_targets_by_id[lower_id]) * rise,
-                )
-            return targets
-
-        def step_beg(rise, paw):
-            if not body_exists(robot):
-                return False
-
-            try:
-                targets = build_beg_targets(rise, paw)
-                for joint_id, target in targets.items():
-                    p.resetJointState(robot, joint_id, target)
-
-                target_pitch = pitch0 - 0.72 * rise + 0.025 * paw * rise
-                target_orn = p.getQuaternionFromEuler([0.0, target_pitch, yaw0])
-                target_pos = [pos0[0], pos0[1], pos0[2]]
-                p.resetBasePositionAndOrientation(robot, target_pos, target_orn)
-
-                if rear_anchor is not None:
-                    rr_pos = p.getLinkState(robot, toe_link_by_leg["RR"])[0]
-                    rl_pos = p.getLinkState(robot, toe_link_by_leg["RL"])[0]
-                    rear_mid_x = (rr_pos[0] + rl_pos[0]) * 0.5
-                    rear_mid_y = (rr_pos[1] + rl_pos[1]) * 0.5
-                    rear_min_z = min(rr_pos[2], rl_pos[2])
-                    target_pos = [
-                        target_pos[0] + rear_anchor[0] - rear_mid_x,
-                        target_pos[1] + rear_anchor[1] - rear_mid_y,
-                        target_pos[2] + 0.035 - rear_min_z,
-                    ]
-                    p.resetBasePositionAndOrientation(robot, target_pos, target_orn)
-
-                p.resetBaseVelocity(robot, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
-                p.stepSimulation()
-                time.sleep(dt)
-                return True
-            except p.error:
-                return False
-
-        settle_steps = max(1, int(0.26 / dt))
-        for _ in range(settle_steps):
-            if not step_beg(0.0, 0.0):
-                return
-
-        rise_steps = max(1, int(0.68 / dt))
-        for i in range(rise_steps):
-            phase = smoothstep01((i + 1) / float(rise_steps))
-            if not step_beg(phase, 0.0):
-                return
-
-        hold_steps = max(1, int(1.20 / dt))
-        for i in range(hold_steps):
-            phase = (i + 1) / float(hold_steps)
-            paw = math.sin(phase * math.pi * 5.0)
-            if not step_beg(1.0, paw):
-                return
-
-        lower_steps = max(1, int(0.60 / dt))
-        for i in range(lower_steps):
-            phase = 1.0 - smoothstep01((i + 1) / float(lower_steps))
-            if not step_beg(phase, 0.0):
-                return
-
-        settle_back_steps = max(1, int(0.32 / dt))
-        for _ in range(settle_back_steps):
-            if not step_beg(0.0, 0.0):
-                return
-
-    def execute_shake_hand_action():
-        nonlocal vx, vy, wz, target_vx, target_vy, target_wz, posture_blend, gait_phase, external_posture
-        nonlocal idle_hold_active
-        if not body_exists(robot):
-            return
-
-        fr_joints = leg_joints.get("FR", {})
-        if not all(k in fr_joints for k in ("hip", "upper", "lower")):
-            return
-
-        try:
-            pos0, orn0 = p.getBasePositionAndOrientation(robot)
-            _, _, yaw0 = p.getEulerFromQuaternion(orn0)
-        except p.error:
-            return
-
-        vx = vy = wz = 0.0
-        target_vx = target_vy = target_wz = 0.0
-        gait_phase = 0.0
-        posture_blend = 1.0
-        external_posture = "stand"
-        idle_hold_active = False
-
-        def angle_delta(a, b):
-            return math.atan2(math.sin(a - b), math.cos(a - b))
-
-        def smoothstep01(t):
-            t = clamp(t, 0.0, 1.0)
-            return t * t * (3.0 - 2.0 * t)
-
-        def build_shake_targets(lift, wave):
-            targets = dict(stand_targets_by_id)
-
-            for leg, hip_offset, upper_offset, lower_offset in (
-                ("FL", 0.04, -0.04, 0.06),
-                ("RR", 0.02, -0.03, 0.04),
-                ("RL", 0.02, -0.03, 0.04),
-            ):
-                joints = leg_joints.get(leg, {})
-                if not all(k in joints for k in ("hip", "upper", "lower")):
-                    continue
-                hip_id = joints["hip"]
-                upper_id = joints["upper"]
-                lower_id = joints["lower"]
-                targets[hip_id] = clamp_joint(
-                    joint_name_by_id[hip_id],
-                    stand_targets_by_id[hip_id] + hip_offset * lift,
-                )
-                targets[upper_id] = clamp_joint(
-                    joint_name_by_id[upper_id],
-                    stand_targets_by_id[upper_id] + upper_offset * lift,
-                )
-                targets[lower_id] = clamp_joint(
-                    joint_name_by_id[lower_id],
-                    stand_targets_by_id[lower_id] + lower_offset * lift,
-                )
-
-            hip_id = fr_joints["hip"]
-            upper_id = fr_joints["upper"]
-            lower_id = fr_joints["lower"]
-            hip = stand_targets_by_id[hip_id] + 0.16 * lift + 0.05 * wave
-            upper = stand_targets_by_id[upper_id] + 0.48 * lift + 0.08 * wave
-            lower = stand_targets_by_id[lower_id] - 0.94 * lift - 0.14 * wave
-            targets[hip_id] = clamp_joint(joint_name_by_id[hip_id], hip)
-            targets[upper_id] = clamp_joint(joint_name_by_id[upper_id], upper)
-            targets[lower_id] = clamp_joint(joint_name_by_id[lower_id], lower)
-            return targets
-
-        def step_handshake(lift, wave):
-            if not body_exists(robot):
-                return False
-            try:
-                pos, orn = p.getBasePositionAndOrientation(robot)
-                roll, pitch, yaw = p.getEulerFromQuaternion(orn)
-                lin_vel, ang_vel = p.getBaseVelocity(robot)
-            except p.error:
-                return False
-
-            x_err = pos[0] - pos0[0]
-            y_err = pos[1] - pos0[1]
-            yaw_err = angle_delta(yaw0, yaw)
-            support_height = 0.43 + 0.02 * lift
-            fx = clamp(-168.0 * x_err - 38.0 * lin_vel[0], -72.0, 72.0)
-            fy = clamp(-182.0 * y_err - 38.0 * lin_vel[1], -84.0, 84.0)
-            fz = clamp(44.0 * (support_height - pos[2]) - 52.0 * lin_vel[2], -66.0, 42.0)
-            tx = clamp(-190.0 * roll - 34.0 * ang_vel[0], -58.0, 58.0)
-            ty = clamp(-178.0 * pitch - 32.0 * ang_vel[1], -54.0, 54.0)
-            tz = clamp(124.0 * yaw_err - 24.0 * ang_vel[2], -42.0, 42.0)
-
-            try:
-                apply_joint_targets(robot, build_shake_targets(lift, wave))
-                p.applyExternalForce(robot, -1, [fx, fy, fz], [0.0, 0.0, 0.0], p.WORLD_FRAME)
-                p.applyExternalTorque(robot, -1, [tx, ty, tz], p.WORLD_FRAME)
-                p.stepSimulation()
-                time.sleep(dt)
-                return True
-            except p.error:
-                return False
-
-        settle_steps = max(1, int(0.30 / dt))
-        for _ in range(settle_steps):
-            if not step_handshake(0.0, 0.0):
-                return
-
-        raise_steps = max(1, int(0.42 / dt))
-        for i in range(raise_steps):
-            phase = smoothstep01((i + 1) / float(raise_steps))
-            if not step_handshake(phase, 0.0):
-                return
-
-        wave_steps = max(1, int(1.25 / dt))
-        for i in range(wave_steps):
-            phase = (i + 1) / float(wave_steps)
-            wave = math.sin(phase * math.pi * 6.0)
-            if not step_handshake(1.0, wave):
-                return
-
-        lower_steps = max(1, int(0.40 / dt))
-        for i in range(lower_steps):
-            phase = 1.0 - smoothstep01((i + 1) / float(lower_steps))
-            if not step_handshake(phase, 0.0):
-                return
-
-        settle_back_steps = max(1, int(0.28 / dt))
-        for _ in range(settle_back_steps):
-            if not step_handshake(0.0, 0.0):
                 return
 
     def apply_base_cmd(vx_cmd, vy_cmd, wz_cmd):
@@ -1177,7 +910,7 @@ def main():
             return False
 
     if external_cmd_file:
-        print("[quad_sim] commands come from main.py (follow/patrol/greet/beg/shake_hand/sit/stand/stop)")
+        print("[quad_sim] commands come from main.py (follow/patrol/greet/sit/stand/stop)")
     else:
         print("Controls: W/S forward/back, Q/E strafe, A/D rotate, Space stop, R reset, Esc quit")
     if stairs_mode:
@@ -1257,17 +990,9 @@ def main():
                 external_action_id = external_cmd["action_id"]
                 if external_posture == "sit":
                     target_vx = target_vy = target_wz = 0.0
-                if external_action == "beg" and external_action_id > last_external_action_id:
-                    last_external_action_id = external_action_id
-                    execute_beg_action()
-                    target_vx = target_vy = target_wz = 0.0
                 if external_action == "greet" and external_action_id > last_external_action_id:
                     last_external_action_id = external_action_id
                     execute_greet_action()
-                    target_vx = target_vy = target_wz = 0.0
-                if external_action == "shake_hand" and external_action_id > last_external_action_id:
-                    last_external_action_id = external_action_id
-                    execute_shake_hand_action()
                     target_vx = target_vy = target_wz = 0.0
                 w_down = s_down = q_down = e_down = a_down = d_down = False
 
